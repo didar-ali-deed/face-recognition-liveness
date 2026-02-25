@@ -5,8 +5,9 @@ Pillow
 torch
 torchvision
 
-# Face detection — MTCNN replaces MediaPipe (better accuracy, purpose-built for faces)
+# Face detection
 mtcnn
+tensorflow
 
 # Face recognition & liveness
 onnxruntime
@@ -15,6 +16,8 @@ progressbar2
 
 # API
 flask
+flask-limiter        # rate limiting
+waitress             # production WSGI server (Windows-compatible)
 python-dotenv
 jsonpickle
 requests

@@ -7,6 +7,7 @@ __pycache__/
 *.jpg
 *.png
 !data/images/reynolds*.png
+data/*.csv
 *.jpeg
 *.avi
 *.mp4
@@ -139,6 +140,7 @@ venv.bak/
 .mypy_cache/
 .dmypy.json
 dmypy.json
+*.ps1
 
 # Pyre type checker
 .pyre/

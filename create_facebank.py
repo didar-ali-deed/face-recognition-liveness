@@ -1,76 +1,163 @@
+"""
+create_facebank.py
+------------------
+Build (or update) a facebank CSV from a folder of reference images.
+
+Facebank CSV format:
+    name, emb_0, emb_1, ..., emb_511
+
+One row per image. Multiple images of the same person are stored as
+separate rows — IdentityVerification will pick the closest match across
+all of them automatically.
+
+Usage examples
+--------------
+# Build from scratch — images in data/images/, one identity called "reynolds"
+python create_facebank.py --images_dir data/images --name reynolds --output data/reynolds.csv
+
+# Add a new identity to an existing facebank
+python create_facebank.py --images_dir data/images/didar --name didar --output data/facebank.csv --append
+
+# Build a multi-identity facebank where each sub-folder is an identity name
+python create_facebank.py --images_dir data/identities --output data/facebank.csv --subdirs
+"""
+
 import argparse
-import csv
 import os
-import sys
-import urllib
-from glob import glob
 from pathlib import Path
 
 import cv2
 import numpy as np
 import onnxruntime
-from tqdm import tqdm
+import pandas as pd
 
-from facetools import FaceDetection, IdentityVerification
+from facetools import FaceDetection
 
-# Create the parser
-parser = argparse.ArgumentParser(description="Argument for creating facebank csv file")
+SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
-# Add the arguments
-parser.add_argument(
-    "--images", metavar="path", type=str, help="the path to the images folder"
-)
-parser.add_argument(
-    "--checkpoint",
-    metavar="path",
-    type=str,
-    help="the path to the resnet vggface2 onnx checkpoint",
-)
-parser.add_argument(
-    "--output", metavar="path", type=str, help="the path to the output csv file"
-)
-args = parser.parse_args()
 
-input_path = args.images
-checkpoint_path = args.checkpoint
-csv_path = args.output
+def get_embedding(resnet: onnxruntime.InferenceSession, face_arr: np.ndarray) -> np.ndarray:
+    face = np.moveaxis(face_arr, -1, 0)
+    inp = np.expand_dims((face - 127.5) / 128.0, 0).astype(np.float32)
+    return resnet.run(["output"], {"input": inp})[0]  # shape (1, 512)
 
-if not os.path.isdir(input_path):
-    print(f"The path [{input_path}] is not a directory")
-    sys.exit()
 
-images_list = (
-    glob(os.path.join(input_path, "*.jpg"))
-    + glob(os.path.join(input_path, "*.png"))
-    + glob(os.path.join(input_path, "*.jpeg"))
-)
+def process_image(
+    img_path: Path,
+    name: str,
+    detector: FaceDetection,
+    resnet: onnxruntime.InferenceSession,
+) -> list:
+    """Return a list of rows (one per detected face) ready for the CSV."""
+    image = cv2.imread(str(img_path))
+    if image is None:
+        print(f"  [WARN] Could not read {img_path.name}, skipping.")
+        return []
 
-if not len(images_list):
-    print(f"There is not any images in the [{input_path}] path")
-    sys.exit()
+    faces, _ = detector(image)
+    if not faces:
+        print(f"  [WARN] No face detected in {img_path.name}, skipping.")
+        return []
 
-faceDetector = FaceDetection()
-if not Path(checkpoint_path).is_file():
-    print("Downloading the Inception resnet v1 vggface2 onnx checkpoint")
-    urllib.request.urlretrieve(
-        "https://github.com/ffletcherr/face-recognition-liveness/releases/download/v0.1/InceptionResnetV1_vggface2.onnx",
-        Path(checkpoint_path).absolute().as_posix(),
+    rows = []
+    for face_arr in faces:
+        embedding = get_embedding(resnet, face_arr).flatten()
+        row = [name] + embedding.tolist()
+        rows.append(row)
+        print(f"  [OK]   {img_path.name}  → identity: '{name}'")
+
+    return rows
+
+
+def build_header(embedding_dim: int = 512) -> list:
+    return ["name"] + [f"emb_{i}" for i in range(embedding_dim)]
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Build a labelled facebank CSV.")
+    parser.add_argument(
+        "--images_dir", required=True,
+        help="Folder containing reference images (or sub-folders if --subdirs)."
     )
-resnet = onnxruntime.InferenceSession(
-    checkpoint_path, providers=["CPUExecutionProvider"]
-)
+    parser.add_argument(
+        "--name", default=None,
+        help="Identity label for all images in images_dir. Required unless --subdirs is set."
+    )
+    parser.add_argument(
+        "--output", required=True,
+        help="Output CSV path (e.g. data/facebank.csv)."
+    )
+    parser.add_argument(
+        "--checkpoint", default="data/checkpoints/InceptionResnetV1_vggface2.onnx",
+        help="Path to InceptionResNetV1 ONNX checkpoint."
+    )
+    parser.add_argument(
+        "--append", action="store_true",
+        help="Append rows to an existing facebank instead of overwriting."
+    )
+    parser.add_argument(
+        "--subdirs", action="store_true",
+        help="Treat each sub-folder of images_dir as a separate identity (folder name = label)."
+    )
+    args = parser.parse_args()
 
-f = open(csv_path, "w")
-writer = csv.writer(f)
-for image_path in tqdm(images_list):
-    image = cv2.imread(image_path)
-    faces, boxes = faceDetector(image)
-    if not len(faces):
-        continue
+    images_dir = Path(args.images_dir)
+    output_path = Path(args.output)
 
-    face_arr = faces[0]
-    face_arr = np.moveaxis(face_arr, -1, 0)
-    input_arr = np.expand_dims((face_arr - 127.5) / 128.0, 0)
-    embeddings = resnet.run(["output"], {"input": input_arr.astype(np.float32)})[0]
-    writer.writerow(embeddings.flatten().tolist())
-f.close()
+    if not images_dir.is_dir():
+        raise NotADirectoryError(f"images_dir not found: {images_dir}")
+
+    if not args.subdirs and args.name is None:
+        parser.error("--name is required unless --subdirs is set.")
+
+    # Load models
+    print("Loading face detector and recognition model...")
+    detector = FaceDetection(max_num_faces=1)
+    resnet = onnxruntime.InferenceSession(
+        args.checkpoint, providers=["CPUExecutionProvider"]
+    )
+
+    # Collect (image_path, identity_name) pairs
+    pairs = []
+    if args.subdirs:
+        for subdir in sorted(images_dir.iterdir()):
+            if subdir.is_dir():
+                for img_path in sorted(subdir.iterdir()):
+                    if img_path.suffix.lower() in SUPPORTED_EXTENSIONS:
+                        pairs.append((img_path, subdir.name))
+    else:
+        for img_path in sorted(images_dir.iterdir()):
+            if img_path.suffix.lower() in SUPPORTED_EXTENSIONS:
+                pairs.append((img_path, args.name))
+
+    if not pairs:
+        print("No supported images found. Exiting.")
+        return
+
+    # Build new rows
+    print(f"\nProcessing {len(pairs)} image(s)...\n")
+    new_rows = []
+    for img_path, name in pairs:
+        new_rows.extend(process_image(img_path, name, detector, resnet))
+
+    if not new_rows:
+        print("\nNo faces were detected in any image. Facebank not written.")
+        return
+
+    header = build_header()
+    new_df = pd.DataFrame(new_rows, columns=header)
+
+    # Append to existing or create fresh
+    if args.append and output_path.is_file():
+        existing_df = pd.read_csv(output_path)
+        combined_df = pd.concat([existing_df, new_df], ignore_index=True)
+        combined_df.to_csv(output_path, index=False)
+        print(f"\nAppended {len(new_rows)} row(s) to {output_path}  "
+              f"(total: {len(combined_df)} rows)")
+    else:
+        new_df.to_csv(output_path, index=False)
+        print(f"\nFacebank written → {output_path}  ({len(new_rows)} rows)")
+
+
+if __name__ == "__main__":
+    main()

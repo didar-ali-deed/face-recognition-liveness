@@ -426,7 +426,8 @@ class TestAPILiveness:
                                headers={"X-API-Key": API_KEY})
         data = resp.get_json()
         assert resp.status_code == 200
-        assert data["is_live"] is True
+        # /liveness returns 'passed' (KYC format) not 'is_live'
+        assert data["passed"] is True
 
     def test_response_contains_expected_keys(self, api_client):
         img = load_image_bytes(REYNOLDS_IMAGES[0])
@@ -434,7 +435,8 @@ class TestAPILiveness:
                                content_type="image/jpeg",
                                headers={"X-API-Key": API_KEY})
         data = resp.get_json()
-        for key in ("is_live", "score", "deeppix_score", "threshold"):
+        # /liveness returns KYC format: passed, score, deeppix_score, threshold
+        for key in ("passed", "score", "deeppix_score", "threshold"):
             assert key in data, f"Missing key: {key}"
 
 

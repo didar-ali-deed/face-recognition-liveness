@@ -15,7 +15,7 @@ Run in production via:
   FLASK_DEBUG=true python app.py   (uses Flask dev server for local debug)
 """
 
-import imghdr
+
 import logging
 import os
 import time
@@ -69,6 +69,22 @@ if not VALID_API_KEYS:
     )
 
 ALLOWED_IMAGE_TYPES = {"jpeg", "png", "bmp", "webp"}
+
+# Byte-header signatures — replaces deprecated imghdr (removed in Python 3.13)
+_IMAGE_SIGNATURES = [
+    (b"\xff\xd8\xff", "jpeg"),
+    (b"\x89PNG",       "png"),
+    (b"BM",             "bmp"),
+]
+
+def detect_image_type(data: bytes) -> str:
+    """Detect image format from raw bytes. Returns format string or 'unknown'."""
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp"
+    for sig, fmt in _IMAGE_SIGNATURES:
+        if data[:len(sig)] == sig:
+            return fmt
+    return "unknown"
 
 # ---------------------------------------------------------------------------
 # Model loading
@@ -164,7 +180,7 @@ def decode_and_validate_image(raw: bytes) -> tuple:
     Validate and decode raw bytes to a BGR numpy array.
     Returns (image, None) on success or (None, error_response) on failure.
     """
-    img_type = imghdr.what(None, h=raw)
+    img_type = detect_image_type(raw)
     if img_type not in ALLOWED_IMAGE_TYPES:
         return None, error_response(
             f"Unsupported image format '{img_type}'. "

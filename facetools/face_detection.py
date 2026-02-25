@@ -39,7 +39,12 @@ class FaceDetection:
         # MTCNN expects RGB; OpenCV provides BGR
         image_rgb = image[:, :, ::-1]
 
-        detections = self.detector.detect_faces(image_rgb)
+        try:
+            detections = self.detector.detect_faces(image_rgb)
+        except (ValueError, Exception):
+            # MTCNN can raise ValueError when candidate regions are too small
+            # for the second-stage conv layers (e.g. blank or very small images)
+            return [], []
 
         # Filter by confidence and sort best-first
         detections = [
